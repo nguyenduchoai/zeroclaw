@@ -689,61 +689,72 @@ impl Tool for UnoQCameraCaptureTool {
     }
 
     fn description(&self) -> &str {
-        "Capture an image from the on-board camera on Uno Q Linux MPU using GStreamer (gst-launch-1.0)."
+        "Capture a photo from the USB camera on Arduino Uno Q. Returns the image path. Include [IMAGE:<path>] in your response to send it to the user."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "output_path": {
+                "width": {
+                    "type": "integer",
+                    "description": "Image width in pixels (default: 1280)"
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Image height in pixels (default: 720)"
+                },
+                "device": {
                     "type": "string",
-                    "description": "Output file path for the captured image (default: /tmp/capture.jpg)"
+                    "description": "V4L2 device path (default: /dev/video0)"
                 }
-            },
-            "required": []
+            }
         })
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let output_path = args
-            .get("output_path")
+        let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1280);
+        let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(720);
+        let device = args
+            .get("device")
             .and_then(|v| v.as_str())
-            .unwrap_or("/tmp/capture.jpg");
+            .unwrap_or("/dev/video0");
+        let output_path = "/tmp/zeroclaw_capture.jpg";
 
-        let output = tokio::process::Command::new("gst-launch-1.0")
+        let fmt = format!("width={},height={},pixelformat=MJPG", width, height);
+        let output = tokio::process::Command::new("v4l2-ctl")
             .args([
-                "v4l2src",
-                "num-buffers=1",
-                "!",
-                "image/jpeg,width=640,height=480",
-                "!",
-                "filesink",
-                &format!("location={}", output_path),
+                "-d",
+                device,
+                "--set-fmt-video",
+                &fmt,
+                "--stream-mmap",
+                "--stream-count=1",
+                &format!("--stream-to={}", output_path),
             ])
             .output()
             .await;
 
         match output {
+            Ok(out) if out.status.success() => Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "Photo captured ({}x{}) to {}. To send it to the user, include [IMAGE:{}] in your response.",
+                    width, height, output_path, output_path
+                ),
+                error: None,
+            }),
             Ok(out) => {
-                if out.status.success() {
-                    Ok(ToolResult {
-                        success: true,
-                        output: format!("Image captured to {}", output_path),
-                        error: None,
-                    })
-                } else {
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    Ok(ToolResult {
-                        success: false,
-                        output: format!("Camera capture failed: {}", stderr),
-                        error: Some(stderr),
-                    })
-                }
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                Ok(ToolResult {
+                    success: false,
+                    output: format!("Camera capture failed: {}", stderr),
+                    error: Some(stderr),
+                })
             }
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: format!("Failed to run gst-launch-1.0: {}", e),
+                output: format!("Failed to run v4l2-ctl: {}. Is v4l-utils installed?", e),
                 error: Some(e.to_string()),
             }),
         }
